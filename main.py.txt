@@ -1,0 +1,432 @@
+# main.py
+import logging
+from telegram import Update, InlineKeyboardButton, InlineKeyboardMarkup
+from telegram.ext import (
+    Application, CommandHandler, CallbackQueryHandler,
+    ContextTypes, MessageHandler, filters
+)
+import config
+from database import Database
+from game_logic import GameLogic
+
+# Настройка логирования
+logging.basicConfig(
+    format='%(asctime)s - %(name)s - %(levelname)s - %(message)s',
+    level=logging.INFO
+)
+logger = logging.getLogger(__name__)
+
+# Инициализация БД
+db = Database()
+game_logic = GameLogic()
+
+# Команда старт
+async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    user = update.effective_user
+    db_user = db.get_user(user.id, user.username)
+    
+    welcome_text = (
+        f"🏰 Добро пожаловать в средневековье, {user.first_name}!\n\n"
+        "Ты начинаешь как простой крестьянин, но можешь стать великим лордом!\n"
+        "Развивай ферму, нанимай войска и сражайся с другими игроками.\n\n"
+        "📜 Доступные команды:\n"
+        "/profile - Твой профиль\n"
+        "/farm - Управление фермой\n"
+        "/troops - Твои войска\n"
+        "/recruit - Нанять войска\n"
+        "/attack - Атаковать игрока\n"
+        "/market - Рынок (обмен ресурсов)\n"
+        "/top - Топ игроков\n"
+        "/help - Помощь"
+    )
+    
+    await update.message.reply_text(welcome_text)
+
+# Профиль
+async def profile(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    user = update.effective_user
+    db_user = db.get_user(user.id)
+    resources = db.get_resources(user.id)
+    troops = db.get_troops(user.id)
+    
+    gold, food, wood, stone, iron, farm_level = resources
+    
+    upkeep = game_logic.calculate_upkeep(troops)
+    farm_income = db.get_farm_income(user.id)
+    
+    profile_text = (
+        f"👑 Профиль {user.first_name}\n\n"
+        f"💰 Золото: {gold}\n"
+        f"🍖 Еда: {food}\n"
+        f"🪵 Древесина: {wood}\n"
+        f"🪨 Камень: {stone}\n"
+        f"⚒️ Железо: {iron}\n\n"
+        f"🏡 Уровень фермы: {farm_level}\n"
+        f"📈 Доход фермы: {config.FARM_LEVELS[farm_level]['food_production']} еды/час\n"
+        f"⏳ Накоплено еды: {farm_income}\n"
+        f"⚔️ Содержание войск: {upkeep} еды/час\n\n"
+        f"🛡️ Войска:\n"
+    )
+    
+    for unit_type, count in troops.items():
+        if count > 0:
+            profile_text += f"  {unit_type}: {count}\n"
+    
+    keyboard = [
+        [InlineKeyboardButton("🏡 Собрать урожай", callback_data="collect_farm")],
+        [InlineKeyboardButton("⚔️ Мои войска", callback_data="view_troops")]
+    ]
+    
+    await update.message.reply_text(
+        profile_text,
+        reply_markup=InlineKeyboardMarkup(keyboard)
+    )
+
+# Управление фермой
+async def farm(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    user = update.effective_user
+    resources = db.get_resources(user.id)
+    farm_level = resources[5]
+    
+    farm_text = f"🏡 Ферма (Уровень {farm_level})\n\n"
+    
+    # Информация о текущем уровне
+    current_prod = config.FARM_LEVELS[farm_level]['food_production']
+    farm_text += f"Текущее производство: {current_prod} еды/час\n\n"
+    
+    # Информация о следующем уровне
+    if farm_level < 5:
+        next_level = farm_level + 1
+        next_cost = config.FARM_LEVELS[next_level]['cost']
+        next_prod = config.FARM_LEVELS[next_level]['food_production']
+        
+        cost_text = "Стоимость улучшения:\n"
+        if 'gold' in next_cost:
+            cost_text += f"💰 Золото: {next_cost['gold']}\n"
+        if 'wood' in next_cost:
+            cost_text += f"🪵 Древесина: {next_cost['wood']}\n"
+        if 'stone' in next_cost:
+            cost_text += f"🪨 Камень: {next_cost['stone']}\n"
+        
+        farm_text += f"Следующий уровень: +{next_prod} еды/час\n{cost_text}"
+        
+        keyboard = [[InlineKeyboardButton("📈 Улучшить ферму", callback_data="upgrade_farm")]]
+        await update.message.reply_text(
+            farm_text,
+            reply_markup=InlineKeyboardMarkup(keyboard)
+        )
+    else:
+        farm_text += "✨ Достигнут максимальный уровень!"
+        await update.message.reply_text(farm_text)
+
+# Просмотр войск
+async def troops(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    user = update.effective_user
+    troops = db.get_troops(user.id)
+    resources = db.get_resources(user.id)
+    
+    if not any(troops.values()):
+        await update.message.reply_text("У вас нет войск. Используйте /recruit чтобы нанять солдат!")
+        return
+    
+    troops_text = "⚔️ Твоя армия:\n\n"
+    total_power = 0
+    total_upkeep = 0
+    
+    for unit_type, count in troops.items():
+        if count > 0:
+            power = count * config.UNIT_POWER[unit_type]
+            upkeep = count * config.UNIT_UPKEEP[unit_type]
+            troops_text += f"• {unit_type}: {count} (⚔️ {power} силы, 🍖 {upkeep} еды/час)\n"
+            total_power += power
+            total_upkeep += upkeep
+    
+    troops_text += f"\n📊 Общая сила: {total_power}\n"
+    troops_text += f"🍖 Общее содержание: {total_upkeep} еды/час"
+    
+    await update.message.reply_text(troops_text)
+
+# Найм войск
+async def recruit(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    user = update.effective_user
+    resources = db.get_resources(user.id)
+    
+    recruit_text = "🎯 Найм войск:\n\n"
+    
+    keyboard = []
+    for unit_type, cost in config.UNIT_COSTS.items():
+        power = config.UNIT_POWER[unit_type]
+        upkeep = config.UNIT_UPKEEP[unit_type]
+        
+        cost_text = []
+        if 'gold' in cost:
+            cost_text.append(f"💰{cost['gold']}")
+        if 'food' in cost:
+            cost_text.append(f"🍖{cost['food']}")
+        if 'wood' in cost:
+            cost_text.append(f"🪵{cost['wood']}")
+        if 'stone' in cost:
+            cost_text.append(f"🪨{cost['stone']}")
+        if 'iron' in cost:
+            cost_text.append(f"⚒️{cost['iron']}")
+        
+        recruit_text += f"{unit_type}: ⚔️{power} 🍖{upkeep}/ч | {' '.join(cost_text)}\n"
+        keyboard.append([InlineKeyboardButton(
+            f"Нанять {unit_type}", 
+            callback_data=f"recruit_{unit_type}"
+        )])
+    
+    await update.message.reply_text(
+        recruit_text,
+        reply_markup=InlineKeyboardMarkup(keyboard)
+    )
+
+# Атака
+async def attack(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    if not context.args:
+        await update.message.reply_text(
+            "Укажите ID игрока для атаки!\n"
+            "Пример: /attack 123456789"
+        )
+        return
+    
+    try:
+        target_id = int(context.args[0])
+        attacker_id = update.effective_user.id
+        
+        if target_id == attacker_id:
+            await update.message.reply_text("Нельзя атаковать самого себя!")
+            return
+        
+        # Проверка существования цели
+        target = db.get_user(target_id)
+        if not target:
+            await update.message.reply_text("Игрок не найден!")
+            return
+        
+        # Получаем войска
+        attacker_troops = db.get_troops(attacker_id)
+        defender_troops = db.get_troops(target_id)
+        
+        if not any(attacker_troops.values()):
+            await update.message.reply_text("У вас нет войск для атаки!")
+            return
+        
+        if not any(defender_troops.values()):
+            await update.message.reply_text("У цели нет войск! Атака отменена.")
+            return
+        
+        # Симуляция битвы
+        result, loot, attacker_losses, defender_losses = game_logic.resolve_battle(
+            attacker_troops, defender_troops
+        )
+        
+        # Применяем потери
+        for unit_type, loss in attacker_losses.items():
+            db.remove_troops(attacker_id, unit_type, loss)
+        
+        for unit_type, loss in defender_losses.items():
+            db.remove_troops(target_id, unit_type, loss)
+        
+        # Применяем loot при победе
+        if result == "attacker_victory" and loot:
+            db.update_resources(attacker_id, **loot)
+            # Уменьшаем ресурсы цели
+            for resource, amount in loot.items():
+                db.update_resources(target_id, **{resource: -amount})
+        
+        # Сохраняем битву
+        db.create_battle(
+            attacker_id, target_id, result, loot,
+            attacker_losses, defender_losses
+        )
+        
+        # Формируем отчет
+        report = f"⚔️ РЕЗУЛЬТАТ БИТВЫ ⚔️\n\n"
+        
+        if result == "attacker_victory":
+            report += "🏆 ПОБЕДА! Вы разграбили врага!\n\n"
+            report += f"Трофеи:\n"
+            report += f"💰 Золото: {loot.get('gold', 0)}\n"
+            report += f"🍖 Еда: {loot.get('food', 0)}\n"
+            report += f"🪵 Древесина: {loot.get('wood', 0)}\n"
+            report += f"🪨 Камень: {loot.get('stone', 0)}\n"
+        elif result == "defender_victory":
+            report += "💔 ПОРАЖЕНИЕ! Враг отразил атаку!\n"
+        else:
+            report += "🤝 НИЧЬЯ! Обе стороны понесли потери!\n"
+        
+        report += f"\nВаши потери:\n"
+        for unit, loss in attacker_losses.items():
+            if loss > 0:
+                report += f"• {unit}: {loss}\n"
+        
+        report += f"\nПотери врага:\n"
+        for unit, loss in defender_losses.items():
+            if loss > 0:
+                report += f"• {unit}: {loss}\n"
+        
+        await update.message.reply_text(report)
+        
+    except ValueError:
+        await update.message.reply_text("Неверный формат ID!")
+
+# Топ игроков
+async def top(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    cursor = db.conn.cursor()
+    cursor.execute('''
+        SELECT username, gold, food, farm_level 
+        FROM users 
+        ORDER BY gold DESC 
+        LIMIT 10
+    ''')
+    top_players = cursor.fetchall()
+    
+    top_text = "🏆 ТОП-10 БОГАТЕЙШИХ ЛОРДОВ 🏆\n\n"
+    
+    for i, (username, gold, food, farm_level) in enumerate(top_players, 1):
+        name = username if username else f"Игрок"
+        top_text += f"{i}. {name} - 💰{gold} 🍖{food} (Ферма {farm_level})\n"
+    
+    await update.message.reply_text(top_text)
+
+# Обработка callback кнопок
+async def button_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    query = update.callback_query
+    await query.answer()
+    
+    user_id = update.effective_user.id
+    data = query.data
+    
+    if data == "collect_farm":
+        food_collected = db.collect_farm(user_id)
+        await query.edit_message_text(
+            f"🍖 Собрано урожая: {food_collected} еды!"
+        )
+    
+    elif data == "upgrade_farm":
+        success, message = db.upgrade_farm(user_id)
+        await query.edit_message_text(message)
+    
+    elif data == "view_troops":
+        troops = db.get_troops(user_id)
+        troops_text = "⚔️ Твои войска:\n"
+        for unit, count in troops.items():
+            if count > 0:
+                troops_text += f"• {unit}: {count}\n"
+        await query.edit_message_text(troops_text)
+    
+    elif data.startswith("recruit_"):
+        unit_type = data.replace("recruit_", "")
+        
+        # Сохраняем выбранный тип юнита в контексте
+        context.user_data['recruiting'] = unit_type
+        
+        await query.edit_message_text(
+            f"Сколько {unit_type} вы хотите нанять?\n"
+            f"Напишите число (например: 5)"
+        )
+
+# Обработка текстовых сообщений (для найма)
+async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    if 'recruiting' in context.user_data:
+        try:
+            count = int(update.message.text)
+            if count <= 0:
+                await update.message.reply_text("Введите положительное число!")
+                return
+            
+            unit_type = context.user_data['recruiting']
+            user_id = update.effective_user.id
+            
+            # Проверка ресурсов
+            resources = db.get_resources(user_id)
+            if game_logic.can_afford_troops(resources, unit_type, count):
+                cost = config.UNIT_COSTS[unit_type]
+                
+                # Списание ресурсов
+                db.update_resources(
+                    user_id,
+                    gold=-cost.get('gold', 0) * count,
+                    food=-cost.get('food', 0) * count,
+                    wood=-cost.get('wood', 0) * count,
+                    stone=-cost.get('stone', 0) * count,
+                    iron=-cost.get('iron', 0) * count
+                )
+                
+                # Добавление войск
+                db.add_troops(user_id, unit_type, count)
+                
+                await update.message.reply_text(
+                    f"✅ Вы наняли {count} {unit_type}!"
+                )
+            else:
+                await update.message.reply_text(
+                    "❌ Недостаточно ресурсов!"
+                )
+            
+            # Очищаем контекст
+            del context.user_data['recruiting']
+            
+        except ValueError:
+            await update.message.reply_text("Пожалуйста, введите число!")
+
+# Помощь
+async def help_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    help_text = (
+        "📜 ПОМОЩЬ ПО ИГРЕ 📜\n\n"
+        "🏰 ОСНОВНЫЕ КОМАНДЫ:\n"
+        "/profile - Твой профиль и ресурсы\n"
+        "/farm - Управление фермой (сбор урожая, улучшение)\n"
+        "/troops - Просмотр своей армии\n"
+        "/recruit - Нанять новых солдат\n"
+        "/attack [id] - Атаковать другого игрока\n"
+        "/top - Топ-10 богатейших игроков\n"
+        "/help - Это меню\n\n"
+        
+        "⚔️ ТИПЫ ВОЙСК:\n"
+        "• spearman - Копейщик (⚔️10, 🍖1/ч)\n"
+        "• swordsman - Мечник (⚔️15, 🍖2/ч)\n"
+        "• archer - Лучник (⚔️12, 🍖1/ч)\n"
+        "• knight - Рыцарь (⚔️25, 🍖3/ч)\n"
+        "• catapult - Катапульта (⚔️30, 🍖4/ч)\n\n"
+        
+        "🏡 ФЕРМА:\n"
+        "Ферма производит еду каждый час. "
+        "Еда нужна для содержания войск. "
+        "Улучшайте ферму для увеличения производства!\n\n"
+        
+        "⚔️ БИТВЫ:\n"
+        "Атакуйте других игроков, чтобы забрать их ресурсы. "
+        "Победитель получает трофеи, проигравший теряет войска и ресурсы!"
+    )
+    
+    await update.message.reply_text(help_text)
+
+def main():
+    """Запуск бота"""
+    # Создание приложения
+    application = Application.builder().token(config.BOT_TOKEN).build()
+    
+    # Регистрация обработчиков команд
+    application.add_handler(CommandHandler("start", start))
+    application.add_handler(CommandHandler("profile", profile))
+    application.add_handler(CommandHandler("farm", farm))
+    application.add_handler(CommandHandler("troops", troops))
+    application.add_handler(CommandHandler("recruit", recruit))
+    application.add_handler(CommandHandler("attack", attack))
+    application.add_handler(CommandHandler("top", top))
+    application.add_handler(CommandHandler("help", help_command))
+    
+    # Обработчик callback кнопок
+    application.add_handler(CallbackQueryHandler(button_callback))
+    
+    # Обработчик текстовых сообщений
+    application.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, handle_message))
+    
+    # Запуск бота
+    print("Бот запущен...")
+    application.run_polling(allowed_updates=Update.ALL_TYPES)
+
+if __name__ == '__main__':
+    main()

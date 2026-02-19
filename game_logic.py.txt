@@ -1,0 +1,99 @@
+# game_logic.py
+import random
+import config
+from typing import Dict, Tuple
+
+class GameLogic:
+    @staticmethod
+    def calculate_battle_power(troops: Dict[str, int]) -> int:
+        total_power = 0
+        for unit_type, count in troops.items():
+            total_power += count * config.UNIT_POWER.get(unit_type, 0)
+        return total_power
+    
+    @staticmethod
+    def calculate_upkeep(troops: Dict[str, int]) -> int:
+        total_upkeep = 0
+        for unit_type, count in troops.items():
+            total_upkeep += count * config.UNIT_UPKEEP.get(unit_type, 0)
+        return total_upkeep
+    
+    @staticmethod
+    def can_afford_troops(user_resources: tuple, unit_type: str, count: int) -> bool:
+        gold, food, wood, stone, iron, _ = user_resources
+        cost = config.UNIT_COSTS[unit_type]
+        
+        if gold < cost.get('gold', 0) * count:
+            return False
+        if food < cost.get('food', 0) * count:
+            return False
+        if wood < cost.get('wood', 0) * count:
+            return False
+        if stone < cost.get('stone', 0) * count:
+            return False
+        if iron < cost.get('iron', 0) * count:
+            return False
+        
+        return True
+    
+    @staticmethod
+    def resolve_battle(attacker_troops: Dict[str, int], 
+                       defender_troops: Dict[str, int]) -> Tuple[str, Dict, Dict, Dict]:
+        """
+        Симуляция битвы
+        Возвращает: (результат, loot, потери атакующего, потери защитника)
+        """
+        attacker_power = GameLogic.calculate_battle_power(attacker_troops)
+        defender_power = GameLogic.calculate_battle_power(defender_troops)
+        
+        # Добавляем случайный фактор (±20%)
+        attacker_power *= random.uniform(0.8, 1.2)
+        defender_power *= random.uniform(0.8, 1.2)
+        
+        total_power = attacker_power + defender_power
+        attacker_ratio = attacker_power / total_power if total_power > 0 else 0.5
+        
+        # Расчет потерь
+        attacker_losses = {}
+        defender_losses = {}
+        
+        for unit_type, count in attacker_troops.items():
+            if count > 0:
+                # Потери от 20% до 60% в зависимости от исхода
+                if attacker_ratio > 0.6:  # Победа
+                    loss_rate = random.uniform(0.2, 0.4)
+                elif attacker_ratio > 0.4:  # Ничья
+                    loss_rate = random.uniform(0.3, 0.5)
+                else:  # Поражение
+                    loss_rate = random.uniform(0.4, 0.6)
+                
+                attacker_losses[unit_type] = int(count * loss_rate)
+        
+        for unit_type, count in defender_troops.items():
+            if count > 0:
+                if attacker_ratio < 0.4:  # Победа защитника
+                    loss_rate = random.uniform(0.2, 0.4)
+                elif attacker_ratio < 0.6:  # Ничья
+                    loss_rate = random.uniform(0.3, 0.5)
+                else:  # Поражение защитника
+                    loss_rate = random.uniform(0.4, 0.6)
+                
+                defender_losses[unit_type] = int(count * loss_rate)
+        
+        # Определение победителя и loot
+        if attacker_power > defender_power * 1.2:
+            result = "attacker_victory"
+            loot = {
+                'gold': random.randint(10, 50),
+                'food': random.randint(20, 100),
+                'wood': random.randint(5, 30),
+                'stone': random.randint(5, 20)
+            }
+        elif defender_power > attacker_power * 1.2:
+            result = "defender_victory"
+            loot = {}
+        else:
+            result = "draw"
+            loot = {}
+        
+        return result, loot, attacker_losses, defender_losses

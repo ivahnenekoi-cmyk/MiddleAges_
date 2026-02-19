@@ -1,0 +1,238 @@
+# database.py
+import sqlite3
+import json
+from datetime import datetime, timedelta
+from typing import Dict, List, Optional
+import config
+
+class Database:
+    def __init__(self, db_path: str = config.DATABASE_URL.replace('sqlite:///', '')):
+        self.conn = sqlite3.connect(db_path, check_same_thread=False)
+        self.create_tables()
+    
+    def create_tables(self):
+        cursor = self.conn.cursor()
+        
+        # Таблица пользователей
+        cursor.execute('''
+            CREATE TABLE IF NOT EXISTS users (
+                user_id INTEGER PRIMARY KEY,
+                username TEXT,
+                gold INTEGER DEFAULT 100,
+                food INTEGER DEFAULT 50,
+                wood INTEGER DEFAULT 30,
+                stone INTEGER DEFAULT 20,
+                iron INTEGER DEFAULT 0,
+                farm_level INTEGER DEFAULT 1,
+                last_farm_collect TIMESTAMP,
+                created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+            )
+        ''')
+        
+        # Таблица войск
+        cursor.execute('''
+            CREATE TABLE IF NOT EXISTS troops (
+                user_id INTEGER,
+                unit_type TEXT,
+                count INTEGER DEFAULT 0,
+                PRIMARY KEY (user_id, unit_type),
+                FOREIGN KEY (user_id) REFERENCES users (user_id)
+            )
+        ''')
+        
+        # Таблица кланов
+        cursor.execute('''
+            CREATE TABLE IF NOT EXISTS clans (
+                clan_id INTEGER PRIMARY KEY AUTOINCREMENT,
+                name TEXT UNIQUE,
+                leader_id INTEGER,
+                gold INTEGER DEFAULT 0,
+                created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+                FOREIGN KEY (leader_id) REFERENCES users (user_id)
+            )
+        ''')
+        
+        # Таблица участников клана
+        cursor.execute('''
+            CREATE TABLE IF NOT EXISTS clan_members (
+                clan_id INTEGER,
+                user_id INTEGER,
+                role TEXT DEFAULT 'member',
+                joined_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+                PRIMARY KEY (clan_id, user_id),
+                FOREIGN KEY (clan_id) REFERENCES clans (clan_id),
+                FOREIGN KEY (user_id) REFERENCES users (user_id)
+            )
+        ''')
+        
+        # Таблица сражений
+        cursor.execute('''
+            CREATE TABLE IF NOT EXISTS battles (
+                battle_id INTEGER PRIMARY KEY AUTOINCREMENT,
+                attacker_id INTEGER,
+                defender_id INTEGER,
+                result TEXT,
+                loot_gold INTEGER DEFAULT 0,
+                loot_food INTEGER DEFAULT 0,
+                loot_resources TEXT,
+                attacker_losses TEXT,
+                defender_losses TEXT,
+                battle_time TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+                FOREIGN KEY (attacker_id) REFERENCES users (user_id),
+                FOREIGN KEY (defender_id) REFERENCES users (user_id)
+            )
+        ''')
+        
+        self.conn.commit()
+    
+    def get_user(self, user_id: int, username: str = None):
+        cursor = self.conn.cursor()
+        cursor.execute('SELECT * FROM users WHERE user_id = ?', (user_id,))
+        user = cursor.fetchone()
+        
+        if not user:
+            cursor.execute('''
+                INSERT INTO users (user_id, username, last_farm_collect)
+                VALUES (?, ?, ?)
+            ''', (user_id, username, datetime.now()))
+            self.conn.commit()
+            
+            # Инициализация войск
+            for unit_type in config.UNIT_COSTS.keys():
+                cursor.execute('''
+                    INSERT INTO troops (user_id, unit_type, count)
+                    VALUES (?, ?, 0)
+                ''', (user_id, unit_type))
+            self.conn.commit()
+            
+            return self.get_user(user_id)
+        
+        return user
+    
+    def update_resources(self, user_id: int, **resources):
+        cursor = self.conn.cursor()
+        for resource, amount in resources.items():
+            cursor.execute(f'''
+                UPDATE users 
+                SET {resource} = {resource} + ? 
+                WHERE user_id = ?
+            ''', (amount, user_id))
+        self.conn.commit()
+    
+    def get_resources(self, user_id: int):
+        cursor = self.conn.cursor()
+        cursor.execute('''
+            SELECT gold, food, wood, stone, iron, farm_level 
+            FROM users WHERE user_id = ?
+        ''', (user_id,))
+        return cursor.fetchone()
+    
+    def get_troops(self, user_id: int):
+        cursor = self.conn.cursor()
+        cursor.execute('SELECT unit_type, count FROM troops WHERE user_id = ?', (user_id,))
+        return {row[0]: row[1] for row in cursor.fetchall()}
+    
+    def add_troops(self, user_id: int, unit_type: str, count: int):
+        cursor = self.conn.cursor()
+        cursor.execute('''
+            UPDATE troops 
+            SET count = count + ? 
+            WHERE user_id = ? AND unit_type = ?
+        ''', (count, user_id, unit_type))
+        self.conn.commit()
+    
+    def remove_troops(self, user_id: int, unit_type: str, count: int):
+        cursor = self.conn.cursor()
+        current = cursor.execute('''
+            SELECT count FROM troops 
+            WHERE user_id = ? AND unit_type = ?
+        ''', (user_id, unit_type)).fetchone()
+        
+        if current and current[0] >= count:
+            cursor.execute('''
+                UPDATE troops 
+                SET count = count - ? 
+                WHERE user_id = ? AND unit_type = ?
+            ''', (count, user_id, unit_type))
+            self.conn.commit()
+            return True
+        return False
+    
+    def get_farm_income(self, user_id: int):
+        cursor = self.conn.cursor()
+        cursor.execute('SELECT farm_level, last_farm_collect FROM users WHERE user_id = ?', (user_id,))
+        farm_level, last_collect = cursor.fetchone()
+        
+        if not last_collect:
+            return 0
+        
+        last_collect = datetime.fromisoformat(last_collect)
+        hours_passed = (datetime.now() - last_collect).total_seconds() / 3600
+        
+        if hours_passed <= 0:
+            return 0
+        
+        production_per_hour = config.FARM_LEVELS[farm_level]['food_production']
+        total_food = int(production_per_hour * min(hours_passed, 24))  # Максимум 24 часа
+        
+        return total_food
+    
+    def collect_farm(self, user_id: int):
+        food_to_add = self.get_farm_income(user_id)
+        
+        if food_to_add > 0:
+            cursor = self.conn.cursor()
+            cursor.execute('''
+                UPDATE users 
+                SET food = food + ?, last_farm_collect = ? 
+                WHERE user_id = ?
+            ''', (food_to_add, datetime.now(), user_id))
+            self.conn.commit()
+        
+        return food_to_add
+    
+    def upgrade_farm(self, user_id: int):
+        cursor = self.conn.cursor()
+        cursor.execute('SELECT farm_level, gold, wood, stone FROM users WHERE user_id = ?', (user_id,))
+        farm_level, gold, wood, stone = cursor.fetchone()
+        
+        if farm_level >= 5:
+            return False, "Максимальный уровень фермы"
+        
+        next_level = farm_level + 1
+        cost = config.FARM_LEVELS[next_level]['cost']
+        
+        # Проверка ресурсов
+        if gold < cost.get('gold', 0) or wood < cost.get('wood', 0) or stone < cost.get('stone', 0):
+            return False, "Недостаточно ресурсов"
+        
+        # Списание ресурсов
+        cursor.execute('''
+            UPDATE users 
+            SET farm_level = ?,
+                gold = gold - ?,
+                wood = wood - ?,
+                stone = stone - ?
+            WHERE user_id = ?
+        ''', (next_level, cost.get('gold', 0), cost.get('wood', 0), cost.get('stone', 0), user_id))
+        self.conn.commit()
+        
+        return True, f"Ферма улучшена до {next_level} уровня"
+    
+    def create_battle(self, attacker_id: int, defender_id: int, result: str, 
+                     loot: dict, attacker_losses: dict, defender_losses: dict):
+        cursor = self.conn.cursor()
+        cursor.execute('''
+            INSERT INTO battles 
+            (attacker_id, defender_id, result, loot_gold, loot_food, 
+             loot_resources, attacker_losses, defender_losses)
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+        ''', (
+            attacker_id, defender_id, result,
+            loot.get('gold', 0), loot.get('food', 0),
+            json.dumps({k: v for k, v in loot.items() if k not in ['gold', 'food']}),
+            json.dumps(attacker_losses),
+            json.dumps(defender_losses)
+        ))
+        self.conn.commit()
+        return cursor.lastrowid

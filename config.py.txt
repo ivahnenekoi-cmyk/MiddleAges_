@@ -1,0 +1,50 @@
+# config.py
+import os
+from dotenv import load_dotenv
+
+load_dotenv()
+
+BOT_TOKEN = os.getenv('BOT_TOKEN')
+DATABASE_URL = os.getenv('DATABASE_URL', 'sqlite:///medieval_bot.db')
+
+# Игровые константы
+START_GOLD = 100
+START_FOOD = 50
+START_WOOD = 30
+START_STONE = 20
+
+# Стоимость войск
+UNIT_COSTS = {
+    'spearman': {'food': 10, 'gold': 5, 'wood': 5},
+    'swordsman': {'food': 15, 'gold': 10, 'iron': 5},
+    'archer': {'food': 12, 'gold': 8, 'wood': 8},
+    'knight': {'food': 25, 'gold': 20, 'iron': 15},
+    'catapult': {'food': 30, 'gold': 25, 'wood': 20, 'stone': 15}
+}
+
+# Сила войск в бою
+UNIT_POWER = {
+    'spearman': 10,
+    'swordsman': 15,
+    'archer': 12,
+    'knight': 25,
+    'catapult': 30
+}
+
+# Содержание войск (еды в час)
+UNIT_UPKEEP = {
+    'spearman': 1,
+    'swordsman': 2,
+    'archer': 1,
+    'knight': 3,
+    'catapult': 4
+}
+
+# Уровни ферм и их доход
+FARM_LEVELS = {
+    1: {'cost': {'wood': 20, 'stone': 10}, 'food_production': 5},
+    2: {'cost': {'wood': 40, 'stone': 20, 'gold': 10}, 'food_production': 12},
+    3: {'cost': {'wood': 80, 'stone': 40, 'gold': 25}, 'food_production': 25},
+    4: {'cost': {'wood': 150, 'stone': 80, 'gold': 50}, 'food_production': 50},
+    5: {'cost': {'wood': 300, 'stone': 150, 'gold': 100}, 'food_production': 100}
+}
